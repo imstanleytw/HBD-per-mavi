@@ -1,0 +1,1315 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 互動生日程式 (中心鎖定環繞)</title>
+    <!-- 載入 Tailwind CSS for quick styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 載入 Three.js 函式庫 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- 載入 Tone.js for web audio -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script> 
+    <style>
+        /* 設定網頁背景和字體 */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a1a2e; /* 深色背景 */
+            overflow: hidden; /* 防止滾動 */
+        }
+        /* Canvas 樣式，讓它填滿視窗 */
+        #scene-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: none; /* 初始隱藏，直到 CLI 結束 */
+        }
+        /* 模擬 CLI 的文字動畫效果 */
+        #cli-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #000;
+            color: #00ff00; /* 經典綠色終端機文字 */
+            font-family: monospace;
+            padding: 20px;
+            font-size: clamp(1rem, 5vw, 2rem);
+            white-space: pre-wrap;
+            z-index: 100;
+        }
+        /* 游標閃爍動畫 */
+        .cursor {
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink {
+            from, to { visibility: visible; }
+            50% { visibility: hidden; }
+        }
+        /* 自定義模態框樣式 */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            z-index: 200;
+            display: none;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
+            max-width: 90%;
+            width: 500px;
+            position: relative;
+            font-family: 'Inter', sans-serif;
+        }
+
+        /* 音樂控制按鈕樣式 */
+        #music-control {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 150;
+            cursor: pointer;
+            padding: 10px 20px;
+            background-color: rgba(255, 255, 255, 0.1);
+            color: white;
+            border-radius: 8px;
+            font-size: 14px;
+            backdrop-filter: blur(5px);
+            display: none; /* 初始隱藏，直到 3D 場景啟動 */
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 終端機 (CLI) 模擬覆蓋層 -->
+    <div id="cli-overlay">
+        <!-- 文字內容將由 JavaScript 動態寫入 -->
+    </div>
+
+    <!-- 3D 場景容器 -->
+    <div id="scene-container"></div>
+    
+    <!-- 音樂控制按鈕 -->
+    <div id="music-control" onclick="toggleMusic()">
+        <span id="music-status">▶️ Play Happy Birthday</span>
+    </div>
+
+    
+    <!-- 信件 Modal (預設隱藏) -->
+    <div id="message-modal" class="modal" onclick="hideMessageModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <button class="absolute top-2 right-4 text-gray-500 hover:text-gray-900 text-3xl font-bold" onclick="hideMessageModal()">&times;</button>
+            <div class="p-6">
+                <!-- 標題已更新 -->
+                <h2 class="text-3xl font-bold mb-4 text-pink-600">Buon compleanno!</h2> 
+                <!-- 信件內容已優化，增加愛心裝飾 -->
+                <pre id="letter-content" class="text-gray-800 whitespace-pre-wrap leading-relaxed text-base">
+💖 Mavi, happy birthday! 🎂
+
+I’m really happy that this is the second year I get to celebrate your birthday with you. This time, I tried a way of celebrating that I never would have imagined myself doing, and I hope it makes you happy. I’ll celebrate your birthday with you every year.
+
+I love you. ❤️
+
+— 徐士田 14.12.2025</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- 花束 Modal (預設隱藏) -->
+    <div id="flower-modal" class="modal" onclick="hideFlowerModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <button class="absolute top-2 right-4 text-gray-500 hover:text-gray-900 text-3xl font-bold" onclick="hideFlowerModal()">&times;</button>
+            <div class="p-6 text-center">
+                <p class="text-5xl mb-4">💐</p>
+                <h2 class="text-2xl font-bold mb-4 text-green-600">Flower Delivery Alert!</h2>
+                <p class="text-gray-800 text-lg">
+                    Your flowers are about to arrive. Please keep an eye out for a phone notification❤️
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 設定全域變數
+        let scene, camera, renderer, table, card, flowersHitbox, cakeHitbox;
+        let cardFlipGroup; // 引用卡片翻轉組件
+        // 互動控制變數
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        // 初始旋轉角度調整: 讓視角對準照片間的縫隙 (36度，或 PI * 2 / 10 弧度)
+        let targetRotationX = Math.PI * 2 / 10; 
+        let targetRotationY = 0;
+        let targetCameraDistance = 9.0; // 初始攝影機距離 (放大到 9.0)
+        const MIN_DISTANCE = 3.5;
+        const MAX_DISTANCE = 15.0; // 調整最大距離以適應更大的場景
+        let initialPinchDistance = 0; 
+        let isPinching = false;
+        
+        const container = document.getElementById('scene-container');
+        const cliOverlay = document.getElementById('cli-overlay');
+        const clock = new THREE.Clock();
+        
+        // --- Three.js 互動變數 ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        
+        // --- 蠟燭/音訊相關變數 ---
+        let candleGroup; 
+        let isCandleAnimating = false;
+        const CANDLE_ANIMATION_DURATION = 5.0; // 5 秒動畫
+        let candleAnimationStartTime = 0;
+        const FLAME_SCALE_FACTOR = 2.0; // 火苗放大係數 (放大 2 倍)
+
+        // *** 攝影機/卡片動畫變數 ***
+        let isCameraAnimating = true;
+        const CAMERA_ANIMATION_DURATION = 3.0; // 3 秒入場動畫
+        let cameraAnimationStartTime = 0;
+        const CAMERA_START_DISTANCE = 15.0; // 初始遠距離
+        const CAMERA_START_HEIGHT = 10.0; // 初始高點
+        
+        let isCardFlipping = false;
+        const CARD_FLIP_DURATION = 0.5; // 卡片翻轉 0.5 秒
+        let cardFlipStartTime = 0;
+        const CARD_FLIP_ANGLE = Math.PI; // 180度
+        let cardFlipDirection = 1; // 1: 翻開 (-180度); -1: 翻回 (0度)
+        // -----------------------
+
+        // *** 視覺反饋變數 ***
+        let visualFeedbackObject = null;
+        let visualFeedbackStartTime = 0;
+        const VISUAL_FEEDBACK_DURATION = 0.2; // 0.2 秒的彈跳/放大時間
+        const VISUAL_FEEDBACK_SCALE = 1.05; // 放大 5%
+        // -----------------------
+
+        // *** 音樂控制變數 (Tone.js) ***
+        let synth;
+        let musicSequence;
+        let musicPlaying = false;
+        // ----------------------------
+
+        // 用於模擬影片中的 CLI 效果
+        const cliScript = [
+            { text: "> Mavi", delay: 500 }, 
+            { text: "> today is your birthday", delay: 1000 },
+            { text: "> and because I’m in the military and can’t see you", delay: 1500 },
+            { text: "> so i made you this computer program", delay: 1500 },
+            { text: "> (๑◕‿◕๑) (^o^)/ (๑•̀ㅂ•́)و", delay: 500 },
+            { text: "\n\n[Loading 3D render...] ", delay: 500 },
+            { text: "   [COMPILING] modules/cake.js... OK", delay: 50 },
+            { text: "   [COMPILING] modules/photos.js... OK", delay: 50 },
+            { text: "   [COMPILING] modules/audio.js... OK", delay: 50 },
+            { text: "\n   [EXECUTING] final build:", delay: 500 }
+        ];
+
+        // 3D 模型的參數
+        const CAKE_HEIGHT = 1.0;
+        const CAKE_RADIUS = 0.6;
+        const CAKE_COLOR_1 = 0xff6b81; // 粉色
+        const CAKE_COLOR_2 = 0xfeca57; // 奶油黃
+        const CAKE_COLOR_3 = 0xffffff; // 白色
+        const CAKE_TOP_WORLD_Y = 0.9; // 蛋糕頂部在世界座標中的 Y 位置
+
+        // --- 音樂邏輯 ---
+        function initMusic() {
+            // 創建一個柔和的合成器，用於背景音樂
+            synth = new Tone.PolySynth(Tone.Synth, {
+                 oscillator: { type: "square" },
+                 envelope: {
+                    attack: 0.1,
+                    decay: 0.2,
+                    sustain: 0.5,
+                    release: 1.0
+                },
+                volume: -15 // 降低音量
+            }).toDestination();
+            
+            // 生日快樂歌的旋律 (只使用音符，Tone.Sequence 會處理節奏)
+            const notes = [
+                "G4", "G4", "A4", "G4", "C5", "B4", null,
+                "G4", "G4", "A4", "G4", "D5", "C5", null,
+                "G4", "G4", "G5", "E5", "C5", "B4", "A4",
+                "F5", "F5", "E5", "C5", "D5", "C5", null
+            ];
+            
+            // 節奏安排 (確保每個音符的時間長度正確)
+            const divisions = [
+                "8n", "8n", "4n", "4n", "4n", "4n", "4n",
+                "8n", "8n", "4n", "4n", "4n", "4n", "4n",
+                "8n", "8n", "4n", "4n", "4n", "4n", "4n",
+                "8n", "8n", "4n", "4n", "4n", "2n"
+            ];
+
+            let noteIndex = 0;
+            musicSequence = new Tone.Sequence((time, note) => {
+                if (note) {
+                    synth.triggerAttackRelease(note, "4n", time);
+                }
+            }, notes, "4n").start(0); 
+
+            // 調整時間軸和速度
+            Tone.Transport.bpm.value = 100; 
+            Tone.Transport.loop = true;
+            Tone.Transport.loopEnd = '6m'; 
+            
+            // 由於用戶必須先互動才能啟動 AudioContext，我們在初始化時先暫停
+            Tone.Transport.pause();
+        }
+
+        function toggleMusic() {
+            if (!synth) {
+                initMusic();
+            }
+            // 確保 AudioContext 啟動
+            Tone.start();
+
+            if (musicPlaying) {
+                // 停止音樂
+                Tone.Transport.pause();
+                document.getElementById('music-status').textContent = '▶️ Play Happy Birthday';
+            } else {
+                // 播放音樂
+                Tone.Transport.start();
+                document.getElementById('music-status').textContent = '⏸️ Pause Happy Birthday';
+            }
+            musicPlaying = !musicPlaying;
+        }
+        
+        // --- Modal 函式 (保持不變) ---
+        function showMessageModal() {
+            document.getElementById('message-modal').style.display = 'flex';
+        }
+
+        function hideMessageModal() {
+            document.getElementById('message-modal').style.display = 'none';
+            // 關閉 Modal 時，觸發翻回動畫
+            if (cardFlipGroup && Math.abs(cardFlipGroup.rotation.z - (-CARD_FLIP_ANGLE)) < 0.1) {
+                 cardFlipDirection = -1; // 設置翻回方向
+                 isCardFlipping = true;
+                 cardFlipStartTime = clock.getElapsedTime();
+            }
+        }
+
+        function showFlowerModal() {
+            document.getElementById('flower-modal').style.display = 'flex';
+        }
+
+        function hideFlowerModal() {
+            document.getElementById('flower-modal').style.display = 'none';
+        }
+        // --- /Modal 函式 ---
+
+
+        // 啟動 CLI 動畫
+        async function startCLI() {
+            let fullText = '';
+            for (const item of cliScript) {
+                // 清除前一個游標
+                cliOverlay.innerHTML = fullText.replace('<span class="cursor">_</span>', '');
+
+                // 模擬輸入效果
+                for (let i = 0; i < item.text.length; i++) {
+                    fullText += item.text[i];
+                    cliOverlay.innerHTML = fullText + '<span class="cursor">_</span>';
+                    await new Promise(resolve => setTimeout(resolve, 30)); // 打字速度
+                }
+                
+                // 暫停
+                await new Promise(resolve => setTimeout(resolve, item.delay));
+                fullText += '\n';
+            }
+            
+            // *** 模擬進度條動畫 ***
+            let progressBar = '   [....................] 0%';
+            let progressElement = document.createElement('div');
+            progressElement.id = 'progress-bar';
+            progressElement.style.whiteSpace = 'pre';
+            cliOverlay.appendChild(progressElement);
+
+            for (let p = 0; p <= 100; p += 5) {
+                const filled = Math.floor(p / 5);
+                const empty = 20 - filled;
+                
+                progressBar = `   [${'#'.repeat(filled)}${'.'.repeat(empty)}] ${p}%`;
+                progressElement.textContent = progressBar;
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+
+            // 最終狀態
+            progressElement.textContent = '   [####################] 100% COMPLETE';
+            await new Promise(resolve => setTimeout(resolve, 500));
+            // ************************
+
+
+            // CLI 結束，顯示 3D 場景
+            cliOverlay.style.display = 'none';
+            container.style.display = 'block';
+            document.getElementById('music-control').style.display = 'block'; // 顯示音樂控制按鈕
+            
+            initScene();
+            
+            // *** 啟動攝影機動畫 ***
+            cameraAnimationStartTime = clock.getElapsedTime();
+            isCameraAnimating = true;
+            
+            animate();
+        }
+
+        // 轉換 Base64 字串到 ArrayBuffer (for WAV file creation)
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // PCM 數據轉換為 WAV Blob (用於播放 TTS 音訊)
+        function pcmToWav(pcmData, sampleRate) {
+            const numChannels = 1;
+            const bytesPerSample = 2; // Int16
+
+            const buffer = new ArrayBuffer(44 + pcmData.byteLength);
+            const view = new DataView(buffer);
+
+            // WAV header
+            let offset = 0;
+
+            // RIFF chunk
+            writeString(view, offset, 'RIFF'); offset += 4;
+            view.setUint32(offset, 36 + pcmData.byteLength, true); offset += 4;
+            writeString(view, offset, 'WAVE'); offset += 4;
+
+            // fmt chunk
+            writeString(view, offset, 'fmt '); offset += 4;
+            view.setUint32(offset, 16, true); offset += 4;
+            view.setUint16(offset, 1, true); offset += 2; // Audio format (1 = PCM)
+            view.setUint16(offset, numChannels, true); offset += 2;
+            view.setUint32(offset, sampleRate, true); offset += 4;
+            view.setUint32(offset, sampleRate * numChannels * bytesPerSample, true); offset += 4; // Byte rate
+            view.setUint16(offset, numChannels * bytesPerSample, true); offset += 2; // Block align
+            view.setUint16(offset, bytesPerSample * 8, true); offset += 2; // Bits per sample
+
+            // data chunk
+            writeString(view, offset, 'data'); offset += 4;
+            view.setUint32(offset, pcmData.byteLength, true); offset += 4;
+
+            // Write PCM data
+            const pcmBytes = new Uint8Array(pcmData.buffer);
+            for (let i = 0; i < pcmData.byteLength; i++) {
+                view.setUint8(offset + i, pcmBytes[i]);
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        // 播放生日歌的 TTS 語音 (義大利語)
+        async function playBirthdaySong() {
+            // 義大利語祝福: "Buon compleanno, Mavi!"
+            const ttsPrompt = "Buon compleanno, Mavi!"; 
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{
+                    parts: [{ text: ttsPrompt }]
+                }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: "Achird" } // 選擇一個友善的聲音，義大利語
+                        }
+                    }
+                },
+                model: "gemini-2.5-flash-preview-tts"
+            };
+
+            let audioUrl = null;
+            let retries = 0;
+            const maxRetries = 3;
+            let delay = 1000;
+
+            while (retries < maxRetries) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const part = result?.candidates?.[0]?.content?.parts?.[0];
+                    const audioData = part?.inlineData?.data;
+                    const mimeType = part?.inlineData?.mimeType;
+
+                    if (audioData && mimeType && mimeType.startsWith("audio/L16")) {
+                        // 從 MIME 類型中解析採樣率 (e.g., audio/L16;rate=24000)
+                        const match = mimeType.match(/rate=(\d+)/);
+                        const sampleRate = match ? parseInt(match[1], 10) : 24000;
+
+                        const pcmData = base64ToArrayBuffer(audioData);
+                        const pcm16 = new Int16Array(pcmData);
+                        const wavBlob = pcmToWav(pcm16, sampleRate);
+                        audioUrl = URL.createObjectURL(wavBlob);
+                        break; // 成功獲取，跳出迴圈
+                    } else {
+                        console.error("TTS Response missing audio data or invalid MIME type:", mimeType);
+                    }
+                } catch (error) {
+                    retries++;
+                    console.error(`TTS API call failed (Attempt ${retries}):`, error);
+                    if (retries < maxRetries) {
+                        await new Promise(res => setTimeout(res, delay));
+                        delay *= 2; // 指數退避
+                    }
+                }
+            }
+
+            if (audioUrl) {
+                const audio = new Audio(audioUrl);
+                audio.play().catch(e => console.error("Error playing audio:", e));
+            } else {
+                console.error("Failed to generate and play TTS audio after multiple retries.");
+            }
+        }
+
+
+        // 初始化 3D 場景
+        function initScene() {
+            // 1. Scene setup
+            scene = new THREE.Scene();
+
+            // 2. Camera setup 
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            // 初始攝影機位置設置為遠處的起點
+            const initialDistance = targetCameraDistance;
+            const initialX = initialDistance * Math.sin(targetRotationX) * Math.cos(targetRotationY);
+            const initialZ = initialDistance * Math.cos(targetRotationX) * Math.cos(targetRotationY);
+            const initialY = 0.75 + initialDistance * Math.sin(targetRotationY); // Y 軸鎖定在 0.75 高度環繞
+
+            camera.position.set(initialX, initialY, initialZ);
+            camera.lookAt(new THREE.Vector3(0, 0.75, 0)); // 鎖定視角在蛋糕中心
+            
+            // 3. Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x1a1a2e); 
+            container.appendChild(renderer.domElement);
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+
+            const pointLight = new THREE.PointLight(0xffffff, 1.5, 100);
+            pointLight.position.set(0, 5, 2);
+            pointLight.castShadow = true;
+            pointLight.shadow.mapSize.width = 1024;
+            pointLight.shadow.mapSize.height = 1024;
+            pointLight.shadow.camera.near = 0.5;
+            pointLight.shadow.camera.far = 50;
+            scene.add(pointLight);
+
+            // 5. Build the Scene Objects
+            addBackground(); 
+            addTable(); 
+            addCake(); 
+            addPhotoFrames(); // 圖片平面，尺寸放大 3 倍
+            addCard(); // 卡片翻轉邏輯已更新
+            addFlowers(); // 新增花束
+
+            // 6. Event Listeners for interaction (恢復自定義事件處理器)
+            window.addEventListener('resize', onWindowResize, false);
+            container.addEventListener('mousedown', onMouseDown, false);
+            container.addEventListener('mousemove', onMouseMove, false);
+            container.addEventListener('mouseup', onMouseUp, false);
+            
+            container.addEventListener('wheel', onMouseWheel, false);
+            
+            container.addEventListener('touchstart', onTouchStart, false);
+            container.addEventListener('touchmove', onTouchMove, false);
+            container.addEventListener('touchend', onTouchEnd, false); 
+        }
+        
+        // --- 縮放/環繞計算 (恢復自定義邏輯) ---
+
+        function onMouseWheel(event) {
+            event.preventDefault(); 
+            const zoomSpeed = 0.005; 
+            targetCameraDistance += event.deltaY * zoomSpeed;
+            targetCameraDistance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, targetCameraDistance));
+        }
+        
+        function getTouchDistance(touches) {
+            const dx = touches[0].clientX - touches[1].clientX;
+            const dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function onTouchStart(event) {
+            if (event.touches.length === 2) {
+                isPinching = true;
+                initialPinchDistance = getTouchDistance(event.touches);
+            } else if (event.touches.length === 1) {
+                isDragging = true;
+                previousMousePosition.x = event.touches[0].clientX;
+                previousMousePosition.y = event.touches[0].clientY;
+                mouseDownTime = performance.now();
+            }
+        }
+        
+        function onTouchMove(event) {
+            if (event.touches.length === 2) {
+                event.preventDefault(); 
+                const currentPinchDistance = getTouchDistance(event.touches);
+                const deltaDistance = currentPinchDistance - initialPinchDistance;
+                const pinchZoomSpeed = 0.01; 
+                targetCameraDistance -= deltaDistance * pinchZoomSpeed; 
+
+                targetCameraDistance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, targetCameraDistance));
+                initialPinchDistance = currentPinchDistance;
+                isDragging = false; 
+            } else if (event.touches.length === 1 && isDragging) {
+                const deltaX = event.touches[0].clientX - previousMousePosition.x;
+                const deltaY = event.touches[0].clientY - previousMousePosition.y;
+
+                const rotationSpeed = 0.01; 
+                targetRotationX += deltaX * rotationSpeed;
+                targetRotationY = Math.max(-0.5, Math.min(0.5, targetRotationY + deltaY * rotationSpeed));
+
+                previousMousePosition.x = event.touches[0].clientX;
+                previousMousePosition.y = event.touches[0].clientY;
+            }
+        }
+        
+        // --- /縮放事件處理 ---
+
+
+        // --- 點擊事件處理 ---
+
+        let mouseDownTime = 0;
+        const clickThreshold = 200; // 毫秒
+
+        function onMouseDown(event) {
+            isDragging = true;
+            previousMousePosition.x = event.clientX;
+            previousMousePosition.y = event.clientY;
+            mouseDownTime = performance.now();
+        }
+
+        function onMouseUp(event) {
+            if (isDragging && (performance.now() - mouseDownTime < clickThreshold)) {
+                checkIntersection(event.clientX, event.clientY);
+            }
+            isDragging = false;
+        }
+
+        function onTouchEnd(event) {
+            if (!isPinching && isDragging && (performance.now() - mouseDownTime < clickThreshold)) {
+                const clientX = event.changedTouches?.[0]?.clientX || previousMousePosition.x;
+                const clientY = event.changedTouches?.[0]?.clientY || previousMousePosition.y;
+                checkIntersection(clientX, clientY);
+            }
+            isDragging = false;
+            isPinching = false;
+        }
+
+        function checkIntersection(clientX, clientY) {
+            // 點擊時，如果卡片正在翻轉，則忽略點擊
+            if (isCardFlipping) return; 
+
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = - (clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersectableObjects = [];
+            if (card) intersectableObjects.push(card); 
+            if (flowersHitbox) intersectableObjects.push(flowersHitbox);
+            if (cakeHitbox) intersectableObjects.push(cakeHitbox); 
+
+            const intersects = raycaster.intersectObjects(intersectableObjects);
+
+            if (intersects.length > 0) {
+                const intersectedObject = intersects[0].object;
+
+                // *** 觸發視覺反饋 ***
+                let targetGroup = null;
+                
+                if (intersectedObject.name === 'birthday_card') {
+                    targetGroup = cardFlipGroup; 
+                    // *** 觸發翻轉邏輯 (翻開) ***
+                    cardFlipDirection = 1; 
+                    isCardFlipping = true;
+                    cardFlipStartTime = clock.getElapsedTime();
+                } else if (intersectedObject === flowersHitbox) {
+                    targetGroup = intersectedObject.parent; 
+                    showFlowerModal(); 
+                } else if (intersectedObject === cakeHitbox) {
+                    targetGroup = cake; 
+                    playBirthdaySong();
+                }
+
+                if (targetGroup) {
+                    // 觸發視覺反饋
+                    visualFeedbackObject = targetGroup; 
+                    visualFeedbackStartTime = clock.getElapsedTime();
+                }
+            }
+        }
+        
+        // --- /點擊事件處理 ---
+
+        // --- 蠟燭物件創建與動畫設定 ---
+
+        function buildSingleCandle() {
+            const candle = new THREE.Group();
+            const waxColor = 0xCCCCCC;
+            const flameColor = 0xFF7F00;
+            
+            // 蠟燭本體
+            const waxGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.5, 8);
+            const waxMaterial = new THREE.MeshStandardMaterial({ color: waxColor, castShadow: true }); 
+            const wax = new THREE.Mesh(waxGeometry, waxMaterial);
+            wax.position.set(0, 0.25, 0); 
+            wax.castShadow = true;
+            candle.add(wax);
+            
+            // 火焰幾何體 (半徑為 0.02 * 2.0 = 0.04)
+            const FLAME_RADIUS = 0.02 * FLAME_SCALE_FACTOR; 
+            const flameGeometry = new THREE.SphereGeometry(FLAME_RADIUS, 8, 8); 
+            const flameMaterial = new THREE.MeshBasicMaterial({ color: flameColor, transparent: true, opacity: 0.8 });
+            const flame = new THREE.Mesh(flameGeometry, flameMaterial);
+            flame.position.set(0, 0.5, 0); 
+            flame.name = `candle_flame_0`;
+            candle.add(flame);
+            
+            // 火焰光源 (基礎強度為 0.5 * 2.0 = 1.0)
+            const LIGHT_INTENSITY = 0.5 * FLAME_SCALE_FACTOR; 
+            const light = new THREE.PointLight(flameColor, LIGHT_INTENSITY, 2.0); 
+            light.position.set(0, 0.5, 0);
+            light.name = `candle_light_0`;
+            light.castShadow = true; 
+            candle.add(light);
+            
+            // 初始狀態：隱藏火苗
+            flame.visible = false;
+            light.visible = false;
+
+            return candle;
+        }
+
+        function createAndAnimateCandle() {
+            const CAKE_TOP_WORLD_Y = 0.9;
+            candleGroup = buildSingleCandle();
+            candleGroup.userData.isLit = false;
+            const finalPosition = new THREE.Vector3(0, CAKE_TOP_WORLD_Y, 0);
+            const startPosition = new THREE.Vector3(0, 7, 0); 
+
+            candleGroup.userData.startPos = startPosition;
+            candleGroup.userData.endPos = finalPosition;
+            candleGroup.position.copy(startPosition);
+            
+            scene.add(candleGroup);
+            isCandleAnimating = true;
+            candleAnimationStartTime = clock.getElapsedTime();
+        }
+
+        // --- 場景物件創建函式 ---
+
+        function addBackground() {
+            const geometry = new THREE.SphereGeometry(30, 60, 40);
+            geometry.scale(-1, 1, 1); 
+            const material = new THREE.MeshBasicMaterial({
+                color: 0x000033, 
+                side: THREE.BackSide,
+                transparent: true,
+                opacity: 0.98,
+            });
+
+            const backgroundMesh = new THREE.Mesh(geometry, material);
+            scene.add(backgroundMesh);
+            
+            const vertices = [];
+            const colors = [];
+            const starCount = 500;
+            const starDistance = 25;
+            
+            for (let i = 0; i < starCount; i++) {
+                const x = THREE.MathUtils.randFloatSpread(starDistance * 2);
+                const y = THREE.MathUtils.randFloatSpread(starDistance * 2);
+                const z = THREE.MathUtils.randFloatSpread(starDistance * 2);
+                
+                if (new THREE.Vector3(x, y, z).length() < starDistance) {
+                    vertices.push(x, y, z);
+                    const color = new THREE.Color(0.8 + Math.random() * 0.2, 0.8 + Math.random() * 0.2, 1);
+                    colors.push(color.r, color.g, color.b);
+                }
+            }
+
+            const starGeometry = new THREE.BufferGeometry();
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+            starGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+            const starMaterial = new THREE.PointsMaterial({
+                size: 0.1,
+                sizeAttenuation: true,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                vertexColors: true 
+            });
+
+            const stars = new THREE.Points(starGeometry, starMaterial);
+            scene.add(stars);
+        }
+
+        function addTable() {
+            const size = 10;
+            const divisions = 20; 
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const context = canvas.getContext('2d');
+            
+            const color1 = '#ffffff'; 
+            const color2 = '#333333'; 
+            const color3 = '#888888'; 
+
+            context.fillStyle = color1; context.fillRect(0, 0, size/2, size/2);
+            context.fillStyle = color2; context.fillRect(size/2, 0, size/2, size/2);
+            context.fillStyle = color3; context.fillRect(0, size/2, size/2, size/2);
+            context.fillStyle = color2; context.fillRect(size/2, size/2, size/2, size/2);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(divisions, divisions);
+            texture.encoding = THREE.sRGBEncoding;
+
+            const geometry = new THREE.CylinderGeometry(5, 5, 0.1, 64);
+            const material = new THREE.MeshStandardMaterial({ map: texture, receiveShadow: true }); 
+            table = new THREE.Mesh(geometry, material);
+            table.position.y = -0.05;
+            table.receiveShadow = true;
+            scene.add(table);
+        }
+        
+        function addCake() {
+            const CAKE_RADIUS = 0.6;
+            const CAKE_COLOR_1 = 0xff6b81; 
+            const CAKE_COLOR_2 = 0xfeca57; 
+            const CAKE_COLOR_3 = 0xffffff; 
+            
+            cake = new THREE.Group();
+            cake.position.y = 0.05; 
+            cake.name = 'cake_group'; // 給予名稱以便在動畫中引用
+            cake.userData.initialY = cake.position.y; // 記錄初始 Y 位置，用於彈跳反饋
+
+            // 蛋糕結構常量
+            const CAKE_RADIUS_BASE = CAKE_RADIUS + 0.1; // 0.7
+            const CAKE_RADIUS_TOP = CAKE_RADIUS * 0.7;  // 0.42
+            const CAKE_HEIGHT_BASE = 0.5;
+            const CAKE_HEIGHT_TOP = 0.4;
+            const STRAWBERRY_Y_POS = CAKE_HEIGHT_BASE + CAKE_HEIGHT_TOP - 0.1;
+
+            // 1. 底部大蛋糕 (紅色層)
+            const baseGeometry = new THREE.CylinderGeometry(CAKE_RADIUS_BASE, CAKE_RADIUS_BASE, CAKE_HEIGHT_BASE, 32);
+            const baseMaterial = new THREE.MeshStandardMaterial({ color: CAKE_COLOR_1, castShadow: true }); 
+            const baseCake = new THREE.Mesh(baseGeometry, baseMaterial);
+            baseCake.position.y = CAKE_HEIGHT_BASE / 2;
+            baseCake.castShadow = true;
+            baseCake.receiveShadow = true;
+            cake.add(baseCake);
+            
+            // --- 精緻裝飾 START ---
+
+            // 1.1 底部花邊 (白色)
+            const lowerPipingGeo = new THREE.TorusGeometry(CAKE_RADIUS_BASE, 0.03, 16, 100);
+            const lowerPipingMat = new THREE.MeshStandardMaterial({ color: CAKE_COLOR_3, castShadow: true });
+            const lowerPiping = new THREE.Mesh(lowerPipingGeo, lowerPipingMat);
+            lowerPiping.rotation.x = Math.PI / 2;
+            lowerPiping.position.y = 0; 
+            lowerPiping.castShadow = true;
+            cake.add(lowerPiping);
+
+            // 1.2 垂直條紋 (深粉色)
+            const stripeMaterial = new THREE.MeshStandardMaterial({ color: 0xFF0055, castShadow: true }); // Darker Pink/Red
+            const numStripes = 40;
+            for (let i = 0; i < numStripes; i++) {
+                const stripeGeo = new THREE.BoxGeometry(0.02, CAKE_HEIGHT_BASE * 0.9, 0.01);
+                const stripe = new THREE.Mesh(stripeGeo, stripeMaterial);
+                
+                const angle = (i / numStripes) * Math.PI * 2;
+                const radius = CAKE_RADIUS_BASE * 0.99;
+                
+                stripe.position.x = Math.sin(angle) * radius;
+                stripe.position.z = Math.cos(angle) * radius;
+                stripe.position.y = CAKE_HEIGHT_BASE / 2;
+                stripe.rotation.y = -angle;
+                
+                stripe.castShadow = true;
+                cake.add(stripe);
+            }
+            // --- 精緻裝飾 END ---
+
+
+            // 2. 頂部小蛋糕 (奶油黃層)
+            const topGeometry = new THREE.CylinderGeometry(CAKE_RADIUS_TOP, CAKE_RADIUS_TOP, CAKE_HEIGHT_TOP, 32);
+            const topMaterial = new THREE.MeshStandardMaterial({ color: CAKE_COLOR_2, castShadow: true });
+            const topCake = new THREE.Mesh(topGeometry, topMaterial);
+            topCake.position.y = CAKE_HEIGHT_BASE + (CAKE_HEIGHT_TOP / 2); 
+            topCake.castShadow = true;
+            topCake.receiveShadow = true;
+            cake.add(topCake);
+
+            // 3. 中間奶油裝飾 (白)
+            const frostingGeometry = new THREE.TorusGeometry(CAKE_RADIUS_BASE * 0.98, 0.05, 16, 100);
+            const frostingMaterial = new THREE.MeshStandardMaterial({ color: CAKE_COLOR_3, castShadow: true });
+            const frosting = new THREE.Mesh(frostingGeometry, frostingMaterial);
+            frosting.rotation.x = Math.PI / 2;
+            frosting.position.y = CAKE_HEIGHT_BASE;
+            frosting.castShadow = true;
+            cake.add(frosting);
+            
+            // 3.1 頂層奶油花邊 (粉色)
+            const topPipingGeo = new THREE.TorusGeometry(CAKE_RADIUS_TOP * 0.98, 0.04, 16, 100);
+            const topPipingMat = new THREE.MeshStandardMaterial({ color: CAKE_COLOR_1, castShadow: true }); 
+            const topPiping = new THREE.Mesh(topPipingGeo, topPipingMat);
+            topPiping.rotation.x = Math.PI / 2;
+            topPiping.position.y = CAKE_HEIGHT_BASE + CAKE_HEIGHT_TOP; 
+            topPiping.castShadow = true;
+            cake.add(topPiping);
+
+            // 4. 頂部草莓 
+            const strawberryBaseGeo = new THREE.ConeGeometry(0.15, 0.2, 8);
+            const strawberryBaseMat = new THREE.MeshStandardMaterial({ color: 0xff0000, castShadow: true });
+            const strawberryBase = new THREE.Mesh(strawberryBaseGeo, strawberryBaseMat);
+            strawberryBase.position.set(0, STRAWBERRY_Y_POS, 0); 
+            strawberryBase.castShadow = true;
+            cake.add(strawberryBase);
+            
+            // 4.1 草莓葉子 (綠色平面)
+            const leafMaterial = new THREE.MeshStandardMaterial({ color: 0x00FF00, side: THREE.DoubleSide });
+            for (let i = 0; i < 4; i++) {
+                const leafGeo = new THREE.PlaneGeometry(0.1, 0.1);
+                const leaf = new THREE.Mesh(leafGeo, leafMaterial);
+                const angle = (i / 4) * Math.PI * 2;
+                
+                leaf.position.x = Math.sin(angle) * 0.08;
+                leaf.position.z = Math.cos(angle) * 0.08;
+                leaf.position.y = STRAWBERRY_Y_POS - 0.05;
+                
+                leaf.rotation.x = Math.PI / 2;
+                leaf.rotation.z = angle;
+                
+                leaf.castShadow = true;
+                cake.add(leaf);
+            }
+            
+            // 5. *** 點擊偵測用的隱形碰撞箱 ***
+            const hitboxGeometry = new THREE.CylinderGeometry(CAKE_RADIUS_BASE, CAKE_RADIUS_BASE, 1.5, 32);
+            const hitboxMaterial = new THREE.MeshBasicMaterial({ visible: false });
+            cakeHitbox = new THREE.Mesh(hitboxGeometry, hitboxMaterial); // 設為全域變數
+            cakeHitbox.position.y = 0.75;
+            cakeHitbox.name = 'cake_hitbox'; 
+            cake.add(cakeHitbox);
+
+            scene.add(cake);
+            
+            createAndAnimateCandle();
+        }
+        
+        function addPhotoFrames() {
+            const frameGroup = new THREE.Group();
+            
+            // 5 張真實圖片 URL
+            const photoUrls = [
+                'https://i.imgur.com/xKUIgm2.jpeg',
+                'https://i.imgur.com/UknecWI.jpeg',
+                'https://i.imgur.com/Fn5wVyx.jpeg',
+                'https://i.imgur.com/mjJI2zI.jpeg',
+                'https://i.imgur.com/Q7bW7VZ.jpeg'
+            ];
+
+            // 圖片尺寸和距離放大 3 倍
+            const frameDistance = 7.5; 
+            const photoWidth = 1.5;   
+            const photoHeight = 1.05; 
+            const numFrames = 5; 
+
+            // 垂直位置：讓圖片底部更靠近桌子 (Y=0)
+            const imageYPosition = photoHeight / 2 + 0.01; 
+
+            for (let i = 0; i < numFrames; i++) {
+                const angle = (i / numFrames) * Math.PI * 2; 
+                const x = Math.sin(angle) * frameDistance;
+                const z = Math.cos(angle) * frameDistance;
+                
+                // 1. 圖片 (使用 Image() 對象和 THREE.Texture)
+                
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.src = photoUrls[i];
+                
+                // 創建一個基礎材質 (預設為白色，作為回退)。這裡使用 MeshStandardMaterial 來參與光照，增加真實感。
+                let photoMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: 0.8, metalness: 0.1 });
+                
+                img.onload = () => {
+                    const texture = new THREE.Texture(img);
+                    texture.needsUpdate = true;
+                    texture.encoding = THREE.sRGBEncoding;
+
+                    photoMaterial.map = texture;
+                    photoMaterial.needsUpdate = true;
+                    console.log(`Photo ${i + 1} loaded successfully.`);
+                };
+
+                img.onerror = (error) => {
+                    console.error(`Error loading Imgur photo ${i + 1}. Fallback to white color.`, error);
+                };
+                
+                const photoGeometry = new THREE.PlaneGeometry(photoWidth, photoHeight);
+                const photo = new THREE.Mesh(photoGeometry, photoMaterial);
+                
+                photo.position.set(x, imageYPosition, z); 
+                photo.rotation.y = angle + Math.PI; 
+                photo.castShadow = true;
+                photo.receiveShadow = true;
+                frameGroup.add(photo);
+            }
+
+            scene.add(frameGroup);
+        }
+
+        function addFlowers() {
+            const flowerGroup = new THREE.Group();
+            flowerGroup.name = 'flower_group';
+            
+            const FLOWER_POS_X = -3.0; 
+            const FLOWER_POS_Z = 0.0;
+            const VASE_HEIGHT = 0.6;
+            
+            flowerGroup.position.set(FLOWER_POS_X, 0.05, FLOWER_POS_Z); 
+            flowerGroup.userData.initialScale = 1; // 記錄初始比例，用於彈跳反饋
+
+            // 1. 花瓶 (圓柱體)
+            const vaseGeometry = new THREE.CylinderGeometry(0.2, 0.15, VASE_HEIGHT, 16);
+            const vaseMaterial = new THREE.MeshStandardMaterial({ color: 0xADD8E6, transparent: true, opacity: 0.8, castShadow: true });
+            const vase = new THREE.Mesh(vaseGeometry, vaseMaterial);
+            vase.position.y = VASE_HEIGHT / 2; 
+            vase.castShadow = true;
+            flowerGroup.add(vase);
+
+            // 2. 模擬花朵 (簡單的球體)
+            const flowerPositions = [
+                { x: 0.1, z: 0.0, color: 0xFF1493 }, 
+                { x: -0.1, z: 0.1, color: 0xFF69B4 },
+                { x: 0.05, z: -0.15, color: 0xFF0000 },
+                { x: -0.15, z: -0.05, color: 0xFF4500 } 
+            ];
+            const stemMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22, castShadow: true }); 
+
+            flowerPositions.forEach(pos => {
+                const petalGeometry = new THREE.SphereGeometry(0.08, 8, 8);
+                const petalMaterial = new THREE.MeshStandardMaterial({ color: pos.color, castShadow: true }); 
+                const petal = new THREE.Mesh(petalGeometry, petalMaterial);
+                petal.position.set(pos.x, VASE_HEIGHT + 0.3, pos.z); 
+                petal.castShadow = true;
+                flowerGroup.add(petal);
+
+                const stemGeometry = new THREE.CylinderGeometry(0.01, 0.01, 0.3, 4);
+                const stem = new THREE.Mesh(stemGeometry, stemMaterial);
+                stem.position.set(pos.x * 0.5, VASE_HEIGHT + 0.15, pos.z * 0.5);
+                stem.rotation.x = Math.PI / 8; 
+                stem.castShadow = true;
+                flowerGroup.add(stem);
+            });
+            
+            // 3. 點擊偵測區域 (隱形立方體)
+            const hitboxGeometry = new THREE.BoxGeometry(0.5, 1.2, 0.5); 
+            const hitboxMaterial = new THREE.MeshBasicMaterial({ visible: false }); 
+            flowersHitbox = new THREE.Mesh(hitboxGeometry, hitboxMaterial);
+            flowersHitbox.position.y = VASE_HEIGHT / 2 + 0.3; 
+            flowersHitbox.name = 'flower_hitbox';
+            
+            flowersHitbox.userData.initialScale = 1;
+            flowerGroup.add(flowersHitbox);
+            scene.add(flowerGroup);
+        }
+
+        function addCard() {
+            const CARD_WIDTH = 0.8;
+            const CARD_HEIGHT = 0.6;
+            const CARD_Y_OFFSET = 0.01;
+            const CARD_X = 3.0;
+            const CARD_Z = 0.0;
+            
+            // cardFlipGroup 是我們實際點擊和翻轉的對象
+            cardFlipGroup = new THREE.Group();
+            cardFlipGroup.position.set(CARD_X, CARD_Y_OFFSET, CARD_Z);
+            cardFlipGroup.rotation.x = -Math.PI / 2; // 平放在桌上 (繞 X 軸旋轉 -90 度)
+            cardFlipGroup.name = 'card_flip_group';
+            cardFlipGroup.userData.initialScale = 1; // 用於點擊視覺反饋
+            
+            // 1. 卡片封面 (可點擊的表面)
+            const coverTexture = new THREE.TextureLoader().load(
+                'https://placehold.co/400x300/FFDDC1/000000?text=Happy+Birthday%5C%0A+%E8%A6%AA%E6%84%9B%E7%9A%84+Mavi%5C%0A+%E9%BB%9E%E6%93%8A%E7%9C%8B%E4%BF%A1%E4%BB%B6%EF%BC%81', 
+                (texture) => { texture.encoding = THREE.sRGBEncoding; }
+            );
+            const coverMaterial = new THREE.MeshBasicMaterial({ map: coverTexture, side: THREE.DoubleSide });
+            const coverGeometry = new THREE.PlaneGeometry(CARD_WIDTH, CARD_HEIGHT);
+            
+            // *** 調整幾何體錨點，使其繞著長邊的底部邊緣旋轉（Z 軸） ***
+            coverGeometry.translate(0, CARD_HEIGHT / 2, 0); 
+
+            card = new THREE.Mesh(coverGeometry, coverMaterial); // *** card 是封面，用於點擊偵測 ***
+            card.name = 'birthday_card';
+            card.castShadow = true;
+            card.receiveShadow = true;
+            
+            cardFlipGroup.add(card); 
+
+            scene.add(cardFlipGroup);
+
+            // 我們使用 card 物件本身來進行 Raycasting
+        }
+
+        // --- 互動與動畫函式 ---
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 旋轉控制 (恢復自定義邏輯)
+        function onMouseMove(event) {
+            // 確保沒有在縮放或點擊
+            if (!isDragging || isPinching) return;
+
+            const deltaX = event.clientX - previousMousePosition.x;
+            const deltaY = event.clientY - previousMousePosition.y;
+
+            const rotationSpeed = 0.005;
+
+            targetRotationX += deltaX * rotationSpeed;
+            targetRotationY = Math.max(-0.5, Math.min(0.5, targetRotationY + deltaY * rotationSpeed));
+
+            previousMousePosition.x = event.clientX;
+            previousMousePosition.y = event.clientY;
+        }
+
+        function onTouchMove(event) {
+            if (event.touches.length === 2) {
+                // 雙指縮放
+                event.preventDefault(); 
+                const currentPinchDistance = getTouchDistance(event.touches);
+                const deltaDistance = currentPinchDistance - initialPinchDistance;
+                const pinchZoomSpeed = 0.01; 
+                targetCameraDistance -= deltaDistance * pinchZoomSpeed; 
+
+                targetCameraDistance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, targetCameraDistance));
+                initialPinchDistance = currentPinchDistance;
+                isDragging = false; 
+            } else if (event.touches.length === 1 && isDragging) {
+                // 單指旋轉
+                const deltaX = event.touches[0].clientX - previousMousePosition.x;
+                const deltaY = event.touches[0].clientY - previousMousePosition.y;
+
+                const rotationSpeed = 0.01; 
+                targetRotationX += deltaX * rotationSpeed;
+                targetRotationY = Math.max(-0.5, Math.min(0.5, targetRotationY + deltaY * rotationSpeed));
+
+                previousMousePosition.x = event.touches[0].clientX;
+                previousMousePosition.y = event.touches[0].clientY;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+            
+            // --- 攝影機入場動畫 ---
+            if (isCameraAnimating) {
+                const timeElapsed = elapsedTime - cameraAnimationStartTime;
+                const t = Math.min(1, timeElapsed / CAMERA_ANIMATION_DURATION);
+                
+                // 攝影機最終位置
+                const finalDistance = targetCameraDistance;
+                const finalX = finalDistance * Math.sin(targetRotationX) * Math.cos(targetRotationY);
+                const finalZ = finalDistance * Math.cos(targetRotationX) * Math.cos(targetRotationY);
+                const finalY = 0.75 + finalDistance * Math.sin(targetRotationY);
+                
+                // 攝影機起始位置
+                const startX = CAMERA_START_DISTANCE * Math.sin(targetRotationX);
+                const startZ = CAMERA_START_DISTANCE * Math.cos(targetRotationX);
+                const startY = CAMERA_START_HEIGHT;
+
+                // LERP (線性插值)
+                camera.position.x = startX + (finalX - startX) * t;
+                camera.position.y = startY + (finalY - startY) * t;
+                camera.position.z = startZ + (finalZ - startZ) * t;
+
+                if (t >= 1) {
+                    isCameraAnimating = false;
+                }
+            } else {
+                // --- 縮放/環繞計算 (自定義邏輯) ---
+                const currentDistance = camera.position.distanceTo(new THREE.Vector3(0, 0.75, 0)); 
+                const distance = THREE.MathUtils.lerp(currentDistance, targetCameraDistance, 0.1);
+
+                const newX = distance * Math.sin(targetRotationX) * Math.cos(targetRotationY);
+                const newZ = distance * Math.cos(targetRotationX) * Math.cos(targetRotationY);
+                const newY = 0.75 + distance * Math.sin(targetRotationY); 
+                
+                camera.position.set(newX, newY, newZ);
+            }
+            
+            camera.lookAt(new THREE.Vector3(0, 0.75, 0)); // 始終看向蛋糕中心
+
+            // --- 蠟燭插入動畫邏輯 ---
+            if (isCandleAnimating && candleGroup) {
+                const timeElapsed = elapsedTime - candleAnimationStartTime;
+                let t = Math.min(1, timeElapsed / CANDLE_ANIMATION_DURATION); 
+
+                if (t < 1) {
+                    candleGroup.position.lerpVectors(
+                        candleGroup.userData.startPos,
+                        candleGroup.userData.endPos,
+                        t
+                    );
+                    
+                } else {
+                    isCandleAnimating = false;
+                    
+                    const flame = candleGroup.getObjectByName('candle_flame_0');
+                    const light = candleGroup.getObjectByName('candle_light_0');
+                    if (flame) flame.visible = true;
+                    if (light) light.visible = true;
+                }
+            }
+            // ---------------------------
+            
+            // *** 卡片翻轉動畫邏輯 ***
+            if (isCardFlipping && cardFlipGroup) {
+                const timeSinceFlip = elapsedTime - cardFlipStartTime;
+                const t = Math.min(1, timeSinceFlip / CARD_FLIP_DURATION);
+
+                let targetAngle = CARD_FLIP_ANGLE * cardFlipDirection; 
+                let startAngle = 0;
+
+                if (cardFlipDirection === 1) {
+                     // 翻開 (0度 到 -180度)
+                     startAngle = 0;
+                     targetAngle = -CARD_FLIP_ANGLE;
+                     
+                } else if (cardFlipDirection === -1) {
+                    // 翻回 (-180度 到 0度)
+                    startAngle = -CARD_FLIP_ANGLE;
+                    targetAngle = 0;
+                }
+
+                // 繞 Z 軸旋轉 (卡片的長邊)
+                cardFlipGroup.rotation.z = THREE.MathUtils.lerp(startAngle, targetAngle, t); 
+                
+                if (t >= 1) {
+                    isCardFlipping = false;
+                    
+                    if (cardFlipDirection === 1) {
+                         // 動畫結束：翻開到 -180度，顯示 Modal
+                         cardFlipGroup.rotation.z = -CARD_FLIP_ANGLE; 
+                         showMessageModal();
+                    } else {
+                         // 動畫結束：翻回到 0度，結束
+                         cardFlipGroup.rotation.z = 0; 
+                    }
+                }
+            }
+            // ------------------------
+            
+            // *** 視覺反饋動畫邏輯 ***
+            if (visualFeedbackObject) {
+                const timeSinceClick = elapsedTime - visualFeedbackStartTime;
+                const t = timeSinceClick / VISUAL_FEEDBACK_DURATION; 
+
+                if (t < 1) {
+                    const bounceFactor = Math.sin(t * Math.PI) * (VISUAL_FEEDBACK_SCALE - 1.0) * 2;
+
+                    if (visualFeedbackObject.name === 'cake_group') {
+                        // 蛋糕：輕微上下跳動 (影響 Y 位置)
+                        visualFeedbackObject.position.y = visualFeedbackObject.userData.initialY + bounceFactor * 0.15; 
+                    } else {
+                        // 卡片/花束：放大/縮小 (影響 Scale)
+                        const newScale = 1.0 + bounceFactor;
+                        visualFeedbackObject.scale.set(newScale, newScale, newScale);
+                    }
+                } else {
+                    // 動畫結束，重設為初始狀態
+                    if (visualFeedbackObject.name === 'cake_group') {
+                        visualFeedbackObject.position.y = visualFeedbackObject.userData.initialY;
+                    } else {
+                        visualFeedbackObject.scale.set(1, 1, 1);
+                    }
+                    visualFeedbackObject = null; // 清除引用
+                }
+            }
+            // ------------------------
+
+            // 蠟燭火焰閃爍效果 
+            if (candleGroup) {
+                const flame = candleGroup.getObjectByName('candle_flame_0');
+                const light = candleGroup.getObjectByName('candle_light_0');
+                if (flame && flame.visible) {
+                    const flicker = Math.sin(clock.elapsedTime * 10) * 0.05; 
+                    flame.scale.setScalar(FLAME_SCALE_FACTOR + flicker); 
+                    
+                    if (light) {
+                       light.intensity = 1.0 + Math.sin(clock.elapsedTime * 5) * 0.25; 
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // 頁面載入完成後啟動
+        window.onload = function() {
+            // 啟動 CLI 效果
+            startCLI();
+            // 初始化音樂，但保持暫停，等待用戶點擊
+            initMusic(); 
+        };
+
+    </script>
+</body>
+</html>
